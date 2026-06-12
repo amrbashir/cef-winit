@@ -1,4 +1,4 @@
-# cef_winit
+# cef-winit
 
 Standalone Winit + CEF native child-window prototype.
 
@@ -16,8 +16,8 @@ Build the `.app` bundle from this directory:
 
 ```sh
 cargo install cef --version 148.4.0 --features build-util --bin bundle-cef-app
-bundle-cef-app cef_winit -o target/bundle
-open target/bundle/cef_winit.app
+bundle-cef-app cef-winit -o target/bundle
+open target/bundle/cef-winit.app
 ```
 
 ## Linux
