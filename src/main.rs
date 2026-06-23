@@ -1,7 +1,6 @@
 use std::{
     collections::HashMap,
     sync::mpsc::{self, Receiver, Sender},
-    time::{Duration, Instant},
 };
 
 use cef::*;
@@ -11,24 +10,19 @@ use winit::{
     application::ApplicationHandler,
     dpi::{LogicalSize, PhysicalSize},
     event::{StartCause, WindowEvent},
-    event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    event_loop::{ActiveEventLoop, EventLoop, EventLoopProxy},
     window::{Window, WindowAttributes, WindowId},
 };
 
+mod external_pump;
 mod platform;
+use external_pump::ExternalCefPump;
 use platform::NativeHandle;
 
 #[derive(Clone)]
-enum AppEvent {
-    CefWork(Duration),
+pub(crate) enum AppEvent {
     CefInitialized,
     BrowserClosed,
-}
-
-#[derive(Clone, Copy)]
-enum CefPump {
-    Idle,
-    DueAt(Instant),
 }
 
 #[derive(Clone, Copy)]
@@ -62,18 +56,23 @@ struct WinitHostApp {
     proxy: EventLoopProxy,
     windows: HashMap<WindowId, HostWindow>,
     live_browsers: usize,
-    cef_pump: CefPump,
+    external_pump: ExternalCefPump,
 }
 
 impl WinitHostApp {
-    fn new(sender: Sender<AppEvent>, receiver: Receiver<AppEvent>, proxy: EventLoopProxy) -> Self {
+    fn new(
+        sender: Sender<AppEvent>,
+        receiver: Receiver<AppEvent>,
+        proxy: EventLoopProxy,
+        external_pump: ExternalCefPump,
+    ) -> Self {
         Self {
             sender,
             receiver,
             proxy,
             windows: HashMap::new(),
             live_browsers: 0,
-            cef_pump: CefPump::Idle,
+            external_pump,
         }
     }
 
@@ -182,39 +181,15 @@ impl WinitHostApp {
     }
 
     fn advance_cef(&mut self) {
-        #[cfg(target_os = "linux")]
-        drain_glib();
-        cef::do_message_loop_work();
-        #[cfg(target_os = "linux")]
-        drain_glib();
+        self.external_pump.do_message_loop_work();
     }
 
-    fn schedule_cef_work(&mut self, event_loop: &dyn ActiveEventLoop, delay: Duration) {
-        let deadline = Instant::now()
-            .checked_add(delay)
-            .unwrap_or_else(|| Instant::now() + Duration::from_secs(60));
-        self.cef_pump = CefPump::DueAt(deadline);
-        event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-    }
-
-    fn advance_cef_if_due(&mut self, event_loop: &dyn ActiveEventLoop) {
-        if let CefPump::DueAt(deadline) = self.cef_pump {
-            if Instant::now() < deadline {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(deadline));
-                return;
-            }
-
-            self.cef_pump = CefPump::Idle;
-        }
-
-        self.advance_cef();
+    fn poll_external_pump(&mut self) {
+        self.external_pump.poll_platform_events();
     }
 
     fn handle_app_event(&mut self, event_loop: &dyn ActiveEventLoop, event: AppEvent) {
         match event {
-            AppEvent::CefWork(delay) => {
-                self.schedule_cef_work(event_loop, delay);
-            }
             AppEvent::CefInitialized => {
                 self.create_windows(event_loop);
             }
@@ -235,18 +210,21 @@ impl ApplicationHandler for WinitHostApp {
     fn can_create_surfaces(&mut self, _event_loop: &dyn ActiveEventLoop) {}
 
     fn new_events(&mut self, _event_loop: &dyn ActiveEventLoop, cause: StartCause) {
+        self.poll_external_pump();
         if matches!(cause, StartCause::Init) {
             self.advance_cef();
         }
     }
 
     fn proxy_wake_up(&mut self, event_loop: &dyn ActiveEventLoop) {
+        self.poll_external_pump();
         self.drain_app_events(event_loop);
-        self.advance_cef_if_due(event_loop);
     }
 
-    fn about_to_wait(&mut self, event_loop: &dyn ActiveEventLoop) {
-        self.advance_cef_if_due(event_loop);
+    fn about_to_wait(&mut self, _event_loop: &dyn ActiveEventLoop) {
+        self.poll_external_pump();
+        #[cfg(target_os = "linux")]
+        _event_loop.set_control_flow(winit::event_loop::ControlFlow::Poll);
     }
 
     fn window_event(
@@ -267,14 +245,6 @@ impl ApplicationHandler for WinitHostApp {
             }
             _ => {}
         }
-    }
-}
-
-#[cfg(target_os = "linux")]
-fn drain_glib() {
-    let context = glib::MainContext::default();
-    while context.pending() {
-        context.iteration(false);
     }
 }
 
@@ -390,6 +360,7 @@ wrap_app! {
     struct NativeChildApp {
         sender: Sender<AppEvent>,
         proxy: EventLoopProxy,
+        external_pump: ExternalCefPump,
     }
 
     impl App {
@@ -413,7 +384,11 @@ wrap_app! {
         }
 
         fn browser_process_handler(&self) -> Option<BrowserProcessHandler> {
-            Some(NativeChildBrowserProcessHandler::new(self.sender.clone(), self.proxy.clone()))
+            Some(NativeChildBrowserProcessHandler::new(
+                self.sender.clone(),
+                self.proxy.clone(),
+                self.external_pump.clone(),
+            ))
         }
     }
 }
@@ -422,6 +397,7 @@ wrap_browser_process_handler! {
     struct NativeChildBrowserProcessHandler {
         sender: Sender<AppEvent>,
         proxy: EventLoopProxy,
+        external_pump: ExternalCefPump,
     }
 
     impl BrowserProcessHandler {
@@ -432,9 +408,7 @@ wrap_browser_process_handler! {
         }
 
         fn on_schedule_message_pump_work(&self, delay_ms: i64) {
-            let delay = Duration::from_millis(delay_ms.max(0) as u64);
-            let _ = self.sender.send(AppEvent::CefWork(delay));
-            self.proxy.wake_up();
+            self.external_pump.schedule_message_pump_work(delay_ms);
         }
     }
 }
@@ -464,7 +438,8 @@ fn main() -> Result<(), &'static str> {
 
     let proxy = event_loop.create_proxy();
     let (sender, receiver) = mpsc::channel();
-    let mut app = NativeChildApp::new(sender.clone(), proxy.clone());
+    let external_pump = ExternalCefPump::new();
+    let mut app = NativeChildApp::new(sender.clone(), proxy.clone(), external_pump.clone());
     let ret = cef::execute_process(
         Some(args.as_main_args()),
         Some(&mut app),
@@ -495,7 +470,7 @@ fn main() -> Result<(), &'static str> {
         1
     );
 
-    let winit_app = WinitHostApp::new(sender, receiver, proxy);
+    let winit_app = WinitHostApp::new(sender, receiver, proxy, external_pump);
     event_loop
         .run_app(winit_app)
         .map_err(|_| "winit event loop failed")?;
