@@ -31,7 +31,7 @@ impl ExternalCefPump {
     pub(crate) fn schedule_message_pump_work(&self, delay_ms: i64) {
         unsafe {
             let _ = PostMessageW(
-                self.inner.hwnd(),
+                Some(self.inner.hwnd()),
                 MSG_HAVE_WORK,
                 WPARAM(0),
                 LPARAM(delay_ms as isize),
@@ -126,12 +126,12 @@ impl WindowsPumpInner {
     fn do_work(&self) {
         if self.perform_message_loop_work() {
             unsafe {
-                let _ = PostMessageW(self.hwnd(), MSG_HAVE_WORK, WPARAM(0), LPARAM(0));
+                let _ = PostMessageW(Some(self.hwnd()), MSG_HAVE_WORK, WPARAM(0), LPARAM(0));
             }
         } else if !self.is_timer_pending() {
             unsafe {
                 let _ = PostMessageW(
-                    self.hwnd(),
+                    Some(self.hwnd()),
                     MSG_HAVE_WORK,
                     WPARAM(0),
                     LPARAM(TIMER_DELAY_PLACEHOLDER as isize),
@@ -158,14 +158,14 @@ impl WindowsPumpInner {
         debug_assert!(!self.is_timer_pending());
         self.timer_pending.store(true, Ordering::SeqCst);
         unsafe {
-            let _ = SetTimer(self.hwnd(), TIMER_ID, delay_ms as u32, None);
+            let _ = SetTimer(Some(self.hwnd()), TIMER_ID, delay_ms as u32, None);
         }
     }
 
     fn kill_timer(&self) {
         if self.timer_pending.swap(false, Ordering::SeqCst) {
             unsafe {
-                let _ = KillTimer(self.hwnd(), TIMER_ID);
+                let _ = KillTimer(Some(self.hwnd()), TIMER_ID);
             }
         }
     }
