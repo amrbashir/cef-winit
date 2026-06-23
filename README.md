@@ -25,8 +25,14 @@ open target/bundle/cef-winit.app
 Linux native child embedding requires X11/XWayland.
 
 ```sh
-LD_LIBRARY_PATH=.cache/cef:$LD_LIBRARY_PATH \
-cargo run --features linux-x11
+WINIT_UNIX_BACKEND=x11 cargo run --features linux-x11
+```
+
+On Debian/WSL, install CEF's runtime dependencies with:
+
+```sh
+sudo apt update
+sudo apt install -y libnspr4 libnss3 libatk1.0-0t64 libatk-bridge2.0-0t64 libasound2t64 libatspi2.0-0t64
 ```
 
 On Arch, useful runtime packages are:
